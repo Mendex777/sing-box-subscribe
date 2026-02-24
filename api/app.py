@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, jsonify, Response
-from urllib.parse import quote, urlparse, unquote
+from urllib.parse import quote, urlparse, unquote, parse_qsl
 import json
 import os
 import sys
@@ -107,149 +107,152 @@ def edit_temp_json():
             flash(f'Error updating TEMP_JSON_DATA: note that the subscription link should not have a newline at the end, but should be inside double quotes ""')
             return jsonify({'status': 'error', 'message': str(e)})  # 返回错误状态和消息
 
+def _normalize_scheme_slashes(value):
+    if not value:
+        return value
+    index_of_colon = value.find(":")
+    if index_of_colon == -1:
+        return value
+    next_char_index = index_of_colon + 2
+    if next_char_index < len(value) and value[next_char_index] != "/":
+        return value[:next_char_index - 1] + "/" + value[next_char_index - 1:]
+    return value
+
+
+def _extract_source_and_params(encoded_url, query_string):
+    decoded_url = unquote(encoded_url)
+    if query_string:
+        return decoded_url, dict(parse_qsl(query_string, keep_blank_values=True))
+
+    markers = ['&emoji=', '&file=', '&tag=', '&ua=', '&UA=', '&prefix=', '&eps=', '&enn=', '&gh=']
+    marker_indexes = [decoded_url.find(marker) for marker in markers if marker in decoded_url]
+    if marker_indexes:
+        split_index = min(marker_indexes)
+        source = decoded_url[:split_index]
+        inline_query = decoded_url[split_index + 1:]
+        return source, dict(parse_qsl(inline_query, keep_blank_values=True))
+
+    return decoded_url, {}
+
+
+def _build_subscribes(raw_sources, emoji_param, tag_param, ua_param, pre_param, enn_param):
+    sources = [item.strip() for item in raw_sources.split('|') if item.strip()]
+    subscribes = []
+
+    emoji_value = int(emoji_param) if str(emoji_param).isdigit() else 1
+    user_agent_value = ua_param or 'v2rayng'
+
+    for idx, source in enumerate(sources, start=1):
+        source = _normalize_scheme_slashes(unquote(source))
+        if '/api/v4/projects/' in source:
+            parts = source.split('/api/v4/projects/', 1)
+            source = parts[0] + '/api/v4/projects/' + parts[1].replace('/', '%2F', 1)
+
+        subscribe_item = {
+            'url': source,
+            'tag': tag_param if (idx == 1 and tag_param) else f'tag_{idx}',
+            'enabled': True,
+            'emoji': emoji_value,
+            'subgroup': '',
+            'prefix': pre_param or '',
+            'ex-node-name': enn_param or '',
+            'User-Agent': user_agent_value
+        }
+        subscribes.append(subscribe_item)
+
+    return subscribes
+
+
+def _collect_sources_and_params(url_from_path=None):
+    allowed_params = {'emoji', 'file', 'tag', 'ua', 'UA', 'prefix', 'eps', 'enn', 'gh'}
+
+    if request.method == 'POST':
+        payload = request.get_json(silent=True) or {}
+        payload_params = {k: str(v) for k, v in payload.items() if k in allowed_params and v is not None}
+
+        raw_sources = payload.get('sources')
+        if raw_sources is None:
+            raw_sources = payload.get('source')
+        if raw_sources is None:
+            raw_sources = payload.get('url')
+
+        sources = []
+        if isinstance(raw_sources, list):
+            sources = [str(item).strip() for item in raw_sources if str(item).strip()]
+        elif isinstance(raw_sources, str) and raw_sources.strip():
+            if '|' in raw_sources:
+                sources = [item.strip() for item in raw_sources.split('|') if item.strip()]
+            else:
+                sources = [raw_sources.strip()]
+
+        return '|'.join(sources), payload_params
+
+    if url_from_path:
+        query_string = request.query_string.decode('utf-8')
+        source_value, parsed_params = _extract_source_and_params(url_from_path, query_string)
+        raw_sources = source_value.split('url=', 1)[-1] if source_value.startswith('url=') else source_value
+        return raw_sources, parsed_params
+
+    query_params = request.args.to_dict(flat=True)
+    parsed_params = {k: query_params.get(k, '') for k in allowed_params}
+    source_list = request.args.getlist('source')
+    if not source_list:
+        source_single = query_params.get('url', '')
+        if source_single:
+            source_list = [source_single]
+
+    source_list = [item.strip() for item in source_list if item and item.strip()]
+    return '|'.join(source_list), parsed_params
+
+
+@app.route('/config', methods=['GET', 'POST'])
 @app.route('/config/<path:url>', methods=['GET'])
-def config(url):
+def config(url=None):
     user_agent = request.headers.get('User-Agent')
     rua_values = os.getenv('RUA')
     if rua_values and any(rua_value in user_agent for rua_value in rua_values.split(',')):
         return Response(json.dumps({'status': 'error', 'message': 'block'}, indent=4, ensure_ascii=False),
                         content_type='application/json; charset=utf-8', status=403)
     substrings = os.getenv('STR')
-    if substrings and any(substring in url for substring in substrings.split(',')):
-        return Response(json.dumps({'status': 'error', 'message_CN': '填写参数不符合规范'}, indent=4, ensure_ascii=False),
+    if url and substrings and any(substring in url for substring in substrings.split(',')):
+        return Response(json.dumps({'status': 'error', 'message_CN': 'invalid params'}, indent=4, ensure_ascii=False),
                         content_type='application/json; charset=utf-8', status=403)
-    # temp_json_data_str = os.environ['TEMP_JSON_DATA']
-    # temp_json_data = json.loads(temp_json_data_str)
-    temp_json_data = json.loads('{"subscribes":[{"url":"URL","tag":"tag_1","enabled":true,"emoji":1,"subgroup":"","prefix":"","ex-node-name": "","User-Agent":"v2rayng"},{"url":"URL","tag":"tag_2","enabled":false,"emoji":1,"subgroup":"","prefix":"","ex-node-name": "","User-Agent":"v2rayng"},{"url":"URL","tag":"tag_3","enabled":false,"emoji":1,"subgroup":"","prefix":"","ex-node-name": "","User-Agent":"v2rayng"}],"auto_set_outbounds_dns":{"proxy":"","direct":""},"save_config_path":"./config.json","auto_backup":false,"exclude_protocol":"ssr","config_template":"","Only-nodes":false}')
-    subscribe = temp_json_data['subscribes'][0]
-    subscribe2 = temp_json_data['subscribes'][1]
-    subscribe3 = temp_json_data['subscribes'][2]
-    query_string = request.query_string.decode('utf-8')
-    #print (f"query_string: {query_string}")
-    #print (f"url: {url}")
-    #encoded_url = quote(url, safe=':/')  # 对 url 进行编码
-    encoded_url = unquote(url)
-    #print (f"encoded_url: {encoded_url}")
-    index_of_colon = encoded_url.find(":")
 
-    if not query_string:
-        if any(substring in encoded_url for substring in ['&emoji=', '&file=', '&eps=', '&enn=']):
-            if '|' in encoded_url:
-                param = urlparse(encoded_url.rsplit('&', 1)[-1])
-            else:
-                param = urlparse(encoded_url.split('&', 1)[-1])
-            request.args = dict(item.split('=') for item in param.path.split('&'))
-            if request.args.get('prefix'):
-                request.args['prefix'] = unquote(request.args['prefix'])
-            if request.args.get('eps'):
-                request.args['eps'] = unquote(request.args['eps'])
-            if request.args.get('enn'):
-                request.args['enn'] = unquote(request.args['enn'])
-            if request.args.get('file'):
-                index = request.args.get('file').find(":")
-                next_index = index + 2
-                if index != -1:
-                    if next_index < len(request.args['file']) and request.args['file'][next_index] != "/":
-                        request.args['file'] = request.args['file'][:next_index-1] + "/" + request.args['file'][next_index-1:]
-    else:
-        if any(substring in query_string for substring in ['&emoji=', '&file=', '&eps=', '&enn=']):
-            param = urlparse(query_string.split('&', 1)[-1])
-            request.args = dict(item.split('=') for item in param.path.split('&'))
-            if request.args.get('prefix'):
-                request.args['prefix'] = unquote(request.args['prefix'])
-            if request.args.get('eps'):
-                request.args['eps'] = unquote(request.args['eps'])
-            if request.args.get('enn'):
-                request.args['enn'] = unquote(request.args['enn'])
-            if request.args.get('file'):
-                index = request.args.get('file').find(":")
-                next_index = index + 2
-                if index != -1:
-                    if next_index < len(request.args['file']) and request.args['file'][next_index] != "/":
-                        request.args['file'] = request.args['file'][:next_index-1] + "/" + request.args['file'][next_index-1:]
-            elif 'file=' in query_string:
-                index = query_string.find("file=")
-                request.args['file'] = query_string.split('file=')[-1].split('&', 1)[0]
-    #print (f"request.args: {request.args}")
+    temp_json_data = {
+        'subscribes': [],
+        'auto_set_outbounds_dns': {'proxy': '', 'direct': ''},
+        'save_config_path': './config.json',
+        'auto_backup': False,
+        'exclude_protocol': 'ssr',
+        'config_template': '',
+        'Only-nodes': False
+    }
 
-    if index_of_colon != -1:
-        # 检查 ":" 后面是否只有一个 "/"，如果是，添加一个额外的 "/"
-        next_char_index = index_of_colon + 2
-        if next_char_index < len(encoded_url) and encoded_url[next_char_index] != "/":
-            encoded_url = encoded_url[:next_char_index-1] + "/" + encoded_url[next_char_index-1:]
-    if query_string:
-        full_url = f"{encoded_url}?{query_string}"
-    else:
-        if any(substring in encoded_url for substring in ['&emoji=', '&file=']):
-            full_url = f"{encoded_url.split('&')[0]}"
-        else:
-            full_url = f"{encoded_url}"
+    raw_sources, parsed_params = _collect_sources_and_params(url)
 
-    #print (f"full_url: {full_url}")
+    emoji_param = parsed_params.get('emoji', '')
+    file_param = parsed_params.get('file', '')
+    tag_param = parsed_params.get('tag', '')
+    ua_param = parsed_params.get('ua', '') or parsed_params.get('UA', '')
+    pre_param = unquote(parsed_params.get('prefix', '')) if parsed_params.get('prefix') else ''
+    eps_param = unquote(parsed_params.get('eps', '')) if parsed_params.get('eps') else ''
+    enn_param = unquote(parsed_params.get('enn', '')) if parsed_params.get('enn') else ''
+    gh_proxy_param = parsed_params.get('gh', '')
 
-    emoji_param = request.args.get('emoji', '')
-    file_param = request.args.get('file', '')
-    tag_param = request.args.get('tag', '')
-    ua_param = request.args.get('ua', '')
-    UA_param = request.args.get('UA', '')
-    pre_param = request.args.get('prefix', '')
-    eps_param = request.args.get('eps', '')
-    enn_param = request.args.get('enn', '')
-    gh_proxy_param = request.args.get('gh', '')
+    raw_sources = _normalize_scheme_slashes(unquote(raw_sources)).replace(',', '%2C')
+    subscribes = _build_subscribes(raw_sources, emoji_param, tag_param, ua_param, pre_param, enn_param)
+    if not subscribes:
+        return Response(
+            json.dumps({'status': 'error', 'message': 'No subscription sources provided'}, indent=4, ensure_ascii=False),
+            content_type='application/json; charset=utf-8',
+            status=400
+        )
 
-    # 构建要删除的字符串列表
-    params_to_remove = [
-        f'&prefix={quote(pre_param)}',
-        f'&ua={ua_param}',
-        f'&UA={UA_param}',
-        f'&file={file_param}',
-        f'file={file_param}',
-        f'&emoji={emoji_param}',
-        f'&tag={tag_param}',
-        f'&gh={gh_proxy_param}',
-        f'&eps={quote(eps_param)}',
-        f'&enn={quote(enn_param)}'
-    ]
-    # 从url中删除这些字符串
-    full_url = full_url.replace(',', '%2C')
-    for param in params_to_remove:
-        if param in full_url:
-            full_url = full_url.replace(param, '')
-    if request.args.get('url'):
-        full_url = full_url
-    else:
-        full_url = unquote(full_url)
-    if '/api/v4/projects/' in full_url:
-        parts = full_url.split('/api/v4/projects/')
-        full_url = parts[0] + '/api/v4/projects/' + parts[1].replace('/', '%2F', 1)
-    print (full_url)
-    url_parts = full_url.split('|')
-    if len(url_parts) > 1:
-        subscribe['url'] = full_url.split('url=', 1)[-1].split('|')[0] if full_url.startswith('url') else full_url.split('|')[0]
-        subscribe['ex-node-name'] = enn_param
-        subscribe2['url'] = full_url.split('url=', 1)[-1].split('|')[1] if full_url.startswith('url') else full_url.split('|')[1]
-        subscribe2['emoji'] = 1
-        subscribe2['enabled'] = True
-        subscribe2['subgroup'] = ''
-        subscribe2['prefix'] = ''
-        subscribe2['ex-node-name'] = enn_param
-        subscribe2['User-Agent'] = 'v2rayng'
-        if len(url_parts) == 3:
-            subscribe3['url'] = full_url.split('url=', 1)[-1].split('|')[2] if full_url.startswith('url') else full_url.split('|')[2]
-            subscribe3['enabled'] = True
-            subscribe3['ex-node-name'] = enn_param
-    if len(url_parts) == 1:
-        subscribe['url'] = full_url.split('url=', 1)[-1] if full_url.startswith('url') else full_url
-        subscribe['emoji'] = int(emoji_param) if emoji_param.isdigit() else subscribe.get('emoji', '')
-        subscribe['tag'] = tag_param if tag_param else subscribe.get('tag', '')
-        subscribe['prefix'] = pre_param if pre_param else subscribe.get('prefix', '')
-        subscribe['ex-node-name'] = enn_param
-        subscribe['User-Agent'] = ua_param if ua_param else 'v2rayng'
+    temp_json_data['subscribes'] = subscribes
     temp_json_data['exclude_protocol'] = eps_param if eps_param else temp_json_data.get('exclude_protocol', '')
     temp_json_data['config_template'] = unquote(file_param) if file_param else temp_json_data.get('config_template', '')
-    #print (f"Custom Page for {url} with link={full_url}, emoji={emoji_param}, file={file_param}, tag={tag_param}, UA={ua_param}, prefix={pre_param}")
-    #page_content = f"生成的页面内容：{full_url}"
-    #return page_content
+    temp_json_data['config_template'] = _normalize_scheme_slashes(temp_json_data['config_template'])
+
     try:
         selected_template_index = '0'
         selected_gh_proxy_index = ''
@@ -260,29 +263,26 @@ def config(url):
             selected_gh_proxy_index = str(int(gh_proxy_param) - 1)
         temp_json_data = json.dumps(json.dumps(temp_json_data, indent=4, ensure_ascii=False), indent=4, ensure_ascii=False)
         subprocess.check_call([sys.executable, 'main.py', '--template_index', selected_template_index, '--temp_json_data', temp_json_data, '--gh_proxy_index', selected_gh_proxy_index])
-        CONFIG_FILE_NAME = json.loads(os.environ['TEMP_JSON_DATA']).get("save_config_path", "config.json")
-        if CONFIG_FILE_NAME.startswith("./"):
+        CONFIG_FILE_NAME = json.loads(os.environ['TEMP_JSON_DATA']).get('save_config_path', 'config.json')
+        if CONFIG_FILE_NAME.startswith('./'):
             CONFIG_FILE_NAME = CONFIG_FILE_NAME[2:]
-        # 设置配置文件的完整路径
-        config_file_path = os.path.join('/tmp/', CONFIG_FILE_NAME) 
+        config_file_path = os.path.join('/tmp/', CONFIG_FILE_NAME)
         if not os.path.exists(config_file_path):
-            config_file_path = CONFIG_FILE_NAME  # 使用相对于当前工作目录的路径 
+            config_file_path = CONFIG_FILE_NAME
         os.environ['TEMP_JSON_DATA'] = json.dumps(json.loads(data_json['TEMP_JSON_DATA']), indent=4, ensure_ascii=False)
-        # 读取配置文件内容
         with open(config_file_path, 'r', encoding='utf-8') as config_file:
             config_content = config_file.read()
             if config_content:
-                flash('配置文件生成成功', 'success')
-                flash('Tạo file cấu hình thành công', 'Thành công^^')
-        config_data = json.loads(config_content)
+                flash('Configuration generated successfully', 'success')
+                flash('Configuration generated successfully', 'success')
+        json.loads(config_content)
         return Response(config_content, content_type='text/plain; charset=utf-8')
-    except subprocess.CalledProcessError as e:
+    except subprocess.CalledProcessError:
         os.environ['TEMP_JSON_DATA'] = json.dumps(json.loads(data_json['TEMP_JSON_DATA']), indent=4, ensure_ascii=False)
-        return Response(json.dumps({'status': 'error'}, indent=4,ensure_ascii=False), content_type='application/json; charset=utf-8', status=500)
-        #return jsonify({'status': 'error', 'message': str(e)}) 
-    except Exception as e:
-        #flash(f'Error occurred while generating the configuration file: {str(e)}', 'error')
-        return Response(json.dumps({'status': 'error', 'message_CN': '认真看刚刚的网页说明、github写的reademe文件;', 'message_VN': 'Quá thời gian phân tích đăng ký: Vui lòng kiểm tra xem liên kết đăng ký có chính xác không hoặc vui lòng chuyển sang "nogroupstemplate" và thử lại; Vui lòng không chỉnh sửa giá trị "tag", trừ khi bạn hiểu nó làm gì;', 'message_EN': 'Subscription parsing timeout: Please check if the subscription link is correct or please change to "no_groups_template" and try again; Please do not modify the "tag" value unless you understand what it does;'}, indent=4,ensure_ascii=False), content_type='application/json; charset=utf-8', status=500)
+        return Response(json.dumps({'status': 'error'}, indent=4, ensure_ascii=False), content_type='application/json; charset=utf-8', status=500)
+    except Exception:
+        return Response(json.dumps({'status': 'error', 'message_CN': 'Please check README and request parameters;', 'message_VN': 'Subscription parsing timeout: please check the subscription link, or switch to nogroupstemplate and try again; do not modify tag unless you know what it does;', 'message_EN': 'Subscription parsing timeout: Please check if the subscription link is correct or please change to "no_groups_template" and try again; Please do not modify the "tag" value unless you understand what it does;'}, indent=4, ensure_ascii=False), content_type='application/json; charset=utf-8', status=500)
+
 
 @app.route('/generate_config', methods=['POST'])
 def generate_config():

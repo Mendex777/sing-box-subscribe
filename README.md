@@ -43,7 +43,50 @@ docker run -p 5000:5000 sing-box:latest
 6. "https://testingcf.jsdelivr.net"
 ```
 
-### 根据已有的qx，surge，loon，clash规则列表自定义规则集[https://github.com/Toperlock/sing-box-geosite](https://github.com/Toperlock/sing-box-geosite)
+
+### 2026-02 Update (Multi Sources + URI + Safe Input)
+
+The `/config` API has been extended:
+
+- No 3-subscription limit anymore, supports any number of `source` entries
+- Supports mixed input: normal subscription URLs + direct URI links (`vless://`, `vmess://`, `trojan://`, etc.)
+- Keeps legacy format: `/config/<URL_OR_MULTI_URL>`
+- Adds safer modes: `GET /config` and `POST /config` to avoid manual escaping of `|`, `#`, `&`
+
+Recommended safe usage: `GET /config` with repeated `source`
+
+```bash
+curl -L --get --connect-timeout 10 --max-time 30 \
+  --data-urlencode "source=https://prosto.pro1vpn.net/sub/REPLACE_ME" \
+  --data-urlencode "source=vless://UUID@example.com:443?type=tcp&security=reality&pbk=PUBLIC_KEY&fp=chrome&sni=example.com&sid=SHORTID&spx=%2F&flow=xtls-rprx-vision#Proxy2" \
+  --data-urlencode "file=https://raw.githubusercontent.com/Mendex777/sbshell_3/refs/heads/main/config_template/my/config_tproxy_25_07_2025_v1.json" \
+  "http://localhost:5000/config" \
+  -o /etc/sing-box/config.json
+```
+
+Optional: `POST /config` with JSON
+
+```bash
+curl -L --connect-timeout 10 --max-time 30 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sources": [
+      "https://prosto.pro1vpn.net/sub/REPLACE_ME",
+      "vless://UUID@example.com:443?type=tcp&security=reality&pbk=PUBLIC_KEY&fp=chrome&sni=example.com&sid=SHORTID&spx=%2F&flow=xtls-rprx-vision#Proxy2"
+    ],
+    "file": "https://raw.githubusercontent.com/Mendex777/sbshell_3/refs/heads/main/config_template/my/config_tproxy_25_07_2025_v1.json"
+  }' \
+  "http://localhost:5000/config" \
+  -o /etc/sing-box/config.json
+```
+
+Legacy format (still supported):
+
+```bash
+curl -L --connect-timeout 10 --max-time 30 "http://localhost:5000/config/https://example-sub-1|https://example-sub-2&file=2" -o /etc/sing-box/config.json
+```
+
+### Custom Rule Sets from qx/surge/loon/clash Lists [https://github.com/Toperlock/sing-box-geosite](https://github.com/Toperlock/sing-box-geosite)
 
 ### wechat规则集源文件写法：
 ```json
