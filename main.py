@@ -417,29 +417,9 @@ def pro_dns_from_route_rules(route_rule):
     return dns_rule_obj
 
 
-def get_leading_flag_emoji(text):
-    if not text or len(text) < 2:
-        return ''
-    first, second = text[0], text[1]
-    if 0x1F1E6 <= ord(first) <= 0x1F1FF and 0x1F1E6 <= ord(second) <= 0x1F1FF:
-        return first + second
-    return ''
-
-
 def pro_node_template(data_nodes, config_outbound, group):
     if config_outbound.get('filter'):
-        filtered_nodes = nodes_filter(data_nodes, config_outbound['filter'], group)
-        selector_flag = get_leading_flag_emoji(config_outbound.get('tag', ''))
-        if selector_flag:
-            # Keep any node whose tag starts with the same country flag as selector tag.
-            # This avoids edge cases where complex regex filters miss emoji-only names.
-            existing_tags = {node.get('tag') for node in filtered_nodes if node.get('tag')}
-            for node in data_nodes:
-                tag = node.get('tag')
-                if tag and tag.startswith(selector_flag) and tag not in existing_tags:
-                    filtered_nodes.append(node)
-                    existing_tags.add(tag)
-        data_nodes = filtered_nodes
+        data_nodes = nodes_filter(data_nodes, config_outbound['filter'], group)
     return [node.get('tag') for node in data_nodes]
 
 
